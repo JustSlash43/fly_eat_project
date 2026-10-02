@@ -28,6 +28,51 @@ POV_STRIP_W, POV_STRIP_H = 330, 40
 FOOD_RGB = (60, 230, 90)
 
 
+def advance(x: float, y: float, heading: float, turn: float, speed: float) -> tuple[float, float, float]:
+    """One frame of fly kinematics, bouncing off the arena walls. Returns (x, y, heading)."""
+    heading += turn * MAX_TURN_RATE
+    x += math.cos(heading) * speed * MAX_SPEED
+    y += math.sin(heading) * speed * MAX_SPEED
+    # Bounce off the walls. Without this the fly can end up walking
+    # head-on into a wall with food balanced on both sides of its view
+    # (equal left/right drive -> no turn) and stay pinned there forever.
+    if not FLY_RADIUS <= x <= WIDTH - FLY_RADIUS:
+        heading = math.pi - heading
+    if not FLY_RADIUS <= y <= HEIGHT - FLY_RADIUS:
+        heading = -heading
+    x = min(max(x, FLY_RADIUS), WIDTH - FLY_RADIUS)
+    y = min(max(y, FLY_RADIUS), HEIGHT - FLY_RADIUS)
+    return x, y, heading
+
+
+def render_panorama(
+    x: float, y: float, heading: float, objects: list[tuple[float, float, tuple[int, int, int]]], size: int = 128
+) -> np.ndarray:
+    """
+    The panoramic view from (x, y, heading) of objects given as (ox, oy, rgb),
+    as an (size, size, 3) uint8 array: see FlyEnvironment.render_pov_frame.
+    """
+    frame = np.empty((size, size, 3), dtype=np.uint8)
+    frame[:] = BACKGROUND_RGB
+    col_azimuth = (np.arange(size) / (size - 1) - 0.5) * POV_FOV_DEG
+
+    bearings = []
+    for ox, oy, rgb in objects:
+        dx, dy = ox - x, oy - y
+        angle = (math.atan2(dy, dx) - heading + math.pi) % (2 * math.pi) - math.pi
+        bearings.append((math.degrees(angle), math.hypot(dx, dy), rgb))
+
+    # far objects first so nearer ones are drawn on top
+    for azimuth, distance, rgb in sorted(bearings, key=lambda b: -b[1]):
+        if abs(azimuth) > POV_FOV_DEG / 2:
+            continue
+        half_width = max(math.degrees(math.atan2(FOOD_VISUAL_RADIUS, distance)), MIN_FOOD_HALF_WIDTH_DEG)
+        brightness = 1.0 / (1.0 + distance / BRIGHTNESS_FALLOFF)
+        colour = (np.asarray(rgb) * brightness).astype(np.uint8)
+        frame[:, np.abs(col_azimuth - azimuth) <= half_width] = colour
+    return frame
+
+
 class FlyEnvironment:
     def __init__(self, seed: int | None = None, headless: bool = False):
         self.rng = random.Random(seed)
@@ -66,18 +111,7 @@ class FlyEnvironment:
             if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                 return False
 
-        self.heading += turn * MAX_TURN_RATE
-        self.x += math.cos(self.heading) * speed * MAX_SPEED
-        self.y += math.sin(self.heading) * speed * MAX_SPEED
-        # Bounce off the walls. Without this the fly can end up walking
-        # head-on into a wall with food balanced on both sides of its view
-        # (equal left/right drive -> no turn) and stay pinned there forever.
-        if not FLY_RADIUS <= self.x <= WIDTH - FLY_RADIUS:
-            self.heading = math.pi - self.heading
-        if not FLY_RADIUS <= self.y <= HEIGHT - FLY_RADIUS:
-            self.heading = -self.heading
-        self.x = min(max(self.x, FLY_RADIUS), WIDTH - FLY_RADIUS)
-        self.y = min(max(self.y, FLY_RADIUS), HEIGHT - FLY_RADIUS)
+        self.x, self.y, self.heading = advance(self.x, self.y, self.heading, turn, speed)
 
         for i, (fx, fy) in enumerate(self.food):
             if math.hypot(fx - self.x, fy - self.y) < EAT_DISTANCE:
@@ -98,28 +132,7 @@ class FlyEnvironment:
         nearer food dominates what both eyes see. Food in the rear blind spot
         (|azimuth| > FOV/2) is invisible, as for a real fly.
         """
-        frame = np.empty((size, size, 3), dtype=np.uint8)
-        frame[:] = BACKGROUND_RGB
-        col_azimuth = (np.arange(size) / (size - 1) - 0.5) * POV_FOV_DEG
-
-        # far food first so nearer food is drawn on top
-        for azimuth, distance in sorted(self._food_bearings(), key=lambda b: -b[1]):
-            if abs(azimuth) > POV_FOV_DEG / 2:
-                continue
-            half_width = max(math.degrees(math.atan2(FOOD_VISUAL_RADIUS, distance)), MIN_FOOD_HALF_WIDTH_DEG)
-            brightness = 1.0 / (1.0 + distance / BRIGHTNESS_FALLOFF)
-            colour = (np.asarray(FOOD_RGB) * brightness).astype(np.uint8)
-            frame[:, np.abs(col_azimuth - azimuth) <= half_width] = colour
-        return frame
-
-    def _food_bearings(self) -> list[tuple[float, float]]:
-        """(azimuth in degrees relative to heading, +right; distance) for each food item."""
-        bearings = []
-        for fx, fy in self.food:
-            dx, dy = fx - self.x, fy - self.y
-            angle = (math.atan2(dy, dx) - self.heading + math.pi) % (2 * math.pi) - math.pi
-            bearings.append((math.degrees(angle), math.hypot(dx, dy)))
-        return bearings
+        return render_panorama(self.x, self.y, self.heading, [(fx, fy, FOOD_RGB) for fx, fy in self.food], size)
 
     def render(
         self, turn: float, speed: float, diagnostics: dict | None = None, pov: np.ndarray | None = None

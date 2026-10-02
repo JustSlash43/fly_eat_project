@@ -86,3 +86,71 @@ class LIFPopulation:
         for _ in range(n_steps):
             counts[self.step(external_input)] += 1
         return counts
+
+
+class LIFBatch:
+    """
+    B independent brains (one per fly) on the same connectome, with the same
+    dynamics as LIFPopulation. The weight matrix is stored once and every
+    state array has shape (B, n), so one step advances every fly together:
+    the targets of all neurons that fired in any brain come from a single CSR
+    row slice and are scattered back to their own brain with one bincount.
+    """
+
+    def __init__(
+        self,
+        W: sparse.spmatrix,
+        batch: int,
+        tau_m: float = 20.0,
+        tau_syn: float = 5.0,
+        v_th: float = 1.0,
+        v_reset: float = 0.0,
+        refractory_ms: float = 2.0,
+        w_syn: float = 0.035,
+        dt: float = 1.0,
+    ):
+        self.W_pre = sparse.csr_matrix(W.T, dtype=np.float32)
+        self.n = W.shape[0]
+        self.batch = batch
+        self.tau_m = tau_m
+        self.syn_decay = float(np.exp(-dt / tau_syn))
+        self.v_th = v_th
+        self.v_reset = v_reset
+        self.refractory_steps = max(1, round(refractory_ms / dt))
+        self.w_syn = w_syn
+        self.dt = dt
+
+        self.v = np.zeros((batch, self.n), dtype=np.float32)
+        self.i_syn = np.zeros((batch, self.n), dtype=np.float32)
+        self.refractory = np.zeros((batch, self.n), dtype=np.int32)
+        self.fired_brain = np.zeros(0, dtype=np.int64)
+        self.fired_neuron = np.zeros(0, dtype=np.int64)
+
+    def step(self, external_input: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+        """Advance one dt. external_input: (B, n). Returns (brain, neuron) indices of the spikes."""
+        self.i_syn *= self.syn_decay
+        if len(self.fired_neuron):
+            out = self.W_pre[self.fired_neuron]
+            brain = np.repeat(self.fired_brain, np.diff(out.indptr))
+            flat = np.bincount(brain * self.n + out.indices, weights=out.data, minlength=self.batch * self.n)
+            self.i_syn += self.w_syn * flat.reshape(self.batch, self.n).astype(np.float32)
+
+        drive = self.i_syn if external_input is None else self.i_syn + external_input
+        active = self.refractory <= 0
+        self.v[active] += (self.dt / self.tau_m) * (drive[active] - self.v[active])
+
+        fired = active & (self.v >= self.v_th)
+        self.v[fired] = self.v_reset
+        self.refractory[~active] -= 1
+        self.refractory[fired] = self.refractory_steps
+
+        self.fired_brain, self.fired_neuron = np.nonzero(fired)
+        return self.fired_brain, self.fired_neuron
+
+    def run(self, n_steps: int, external_input: np.ndarray | None = None) -> np.ndarray:
+        """Run several steps, return (B, n) spike counts per brain and neuron."""
+        counts = np.zeros((self.batch, self.n), dtype=np.float32)
+        for _ in range(n_steps):
+            brain, neuron = self.step(external_input)
+            counts[brain, neuron] += 1
+        return counts

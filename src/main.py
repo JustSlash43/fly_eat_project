@@ -12,19 +12,22 @@ Usage:
     python src/main.py --subset 20000   # random subset of neurons, faster/lighter
     python src/main.py --fake           # synthetic random graph, no data needed (smoke test)
     python src/main.py --headless --frames 3000   # no window; prints the score (benchmark)
+    python src/main.py --flies 6        # several flies, each with its own brain, in one arena
 """
 from __future__ import annotations
 
 import argparse
+import copy
 import time
 
 import numpy as np
 
 from connectome import Connectome, load_connectome
 from environment import FlyEnvironment
-from lif_simulator import LIFPopulation
+from lif_simulator import LIFBatch, LIFPopulation
 from motors import BiologicalMotorReadout, VisualSteeringReadout
 from sensors import RetinotopicVision
+from swarm_environment import SwarmEnvironment
 
 ESSENTIAL_TYPES = ["R1-R6", "DNa02", "DNp09", "MDN"]
 
@@ -117,6 +120,10 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=None, help="world seed (food placement, start heading)")
     parser.add_argument("--headless", action="store_true", help="no window; run --frames frames and print the score")
     parser.add_argument("--frames", type=int, default=3000, help="frames to run in --headless mode")
+    parser.add_argument("--flies", type=int, default=1, help="number of flies, each with its own copy of the brain")
+    parser.add_argument(
+        "--fly-brightness", type=float, default=0.35, help="how bright flies look to each other (0 = invisible)"
+    )
     args = parser.parse_args()
 
     if args.fake:
@@ -128,9 +135,13 @@ def main() -> None:
             connectome = subset_connectome(connectome, args.subset, preserve_types=ESSENTIAL_TYPES)
         projection = None  # RetinotopicVision loads/builds the real one from data/
 
-    sim = LIFPopulation(connectome.W, w_syn=args.w_syn)
     vision = RetinotopicVision(connectome, gain=args.input_gain, projection=projection)
     steering = VisualSteeringReadout(connectome, vision.indices)
+    if args.flies > 1:
+        run_swarm(args, connectome, vision, steering)
+        return
+
+    sim = LIFPopulation(connectome.W, w_syn=args.w_syn)
     descending = BiologicalMotorReadout(connectome)  # diagnostic only, see motors.VisualSteeringReadout
     env = FlyEnvironment(seed=args.seed, headless=args.headless)
 
@@ -170,6 +181,53 @@ def main() -> None:
 
     if args.headless:
         print(f"final score: {env.score} food in {frame_no} frames")
+    env.close()
+
+
+def run_swarm(args: argparse.Namespace, connectome: Connectome, vision: RetinotopicVision, steering: VisualSteeringReadout) -> None:
+    """Closed loop for --flies N: N independent brains (one LIFBatch) in one shared arena."""
+    n = args.flies
+    sim = LIFBatch(connectome.W, batch=n, w_syn=args.w_syn)
+    # shallow copies share the neuron index arrays but keep their own smoothing state
+    readouts = [copy.copy(steering) for _ in range(n)]
+    env = SwarmEnvironment(n, seed=args.seed, headless=args.headless, fly_brightness=args.fly_brightness)
+
+    frame_no = 0
+    started = time.perf_counter()
+    running = True
+    while running:
+        frames = [env.render_pov_frame(i) for i in range(n)]
+        ext_input = np.stack([vision.drive(f) for f in frames])
+
+        spike_counts = sim.run(args.sim_substeps, external_input=ext_input)
+        actions = [r.read(spike_counts[i]) for i, r in enumerate(readouts)]
+
+        running = env.step([a[0] for a in actions], [a[1] for a in actions])
+        frame_no += 1
+
+        if args.headless:
+            if frame_no % 500 == 0:
+                print(
+                    f"frame {frame_no}: food {sum(f.score for f in env.flies)}, collisions {env.total_collisions}  "
+                    f"({frame_no / (time.perf_counter() - started):.1f} frames/s)"
+                )
+            if frame_no >= args.frames:
+                break
+            continue
+
+        sel = env.selected
+        diagnostics = {
+            "active": int(np.count_nonzero(spike_counts[sel])),
+            "vis_l": readouts[sel].last_left,
+            "vis_r": readouts[sel].last_right,
+        }
+        env.render(actions, diagnostics, pov=frames[sel])
+        env.tick(args.fps)
+
+    if args.headless:
+        for i, f in enumerate(env.flies):
+            print(f"fly {i}: {f.score} food, {f.collisions} collisions")
+        print(f"total: {sum(f.score for f in env.flies)} food, {env.total_collisions} collisions in {frame_no} frames")
     env.close()
 
 

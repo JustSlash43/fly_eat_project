@@ -95,6 +95,32 @@ Measured on the full connectome, 5000 frames per run:
 | random walk, same speed        | 2, 4, 6, 6       |
 | blind fly (`--input-gain 0`)   | 0                |
 
+## 4. Several flies in one arena
+
+```bash
+python src/main.py --flies 6                       # 6 flies, each with its own brain
+python src/main.py --flies 6 --fly-brightness 0    # flies cannot see each other
+python src/main.py --flies 6 --headless --frames 1500 --seed 1
+```
+
+Each fly runs its own copy of the connectome's LIF state (`LIFBatch`: the
+weight matrix is stored once, every brain advances in the same step). Flies
+compete for the same food, see each other in their panoramic views as grey
+bars (`--fly-brightness`, default 0.35 vs. full-brightness food), and are
+pushed apart when they overlap; each new contact counts as a collision.
+In the window, TAB or a click picks which fly's view and brain the HUD shows.
+
+Measured on the full connectome, 6 flies, 1500 frames, seed 1 (~7 frames/s):
+
+| flies see each other           | food eaten | collisions |
+|--------------------------------|------------|------------|
+| yes (`--fly-brightness 0.35`)  | 47         | 55         |
+| no (`--fly-brightness 0`)      | 81         | 19         |
+
+The steering readout turns toward whatever is bright, so visible flies
+attract each other just like food does: they bump into each other more and
+eat less.
+
 ## How it works
 
 - `src/download_connectome.py` — fetches the official feather files over HTTPS.
