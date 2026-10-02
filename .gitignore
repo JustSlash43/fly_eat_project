@@ -1,0 +1,20 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Connectome data (download with: python src/download_connectome.py)
+data/*.feather
+data/*.csv
+data/*.parquet
+# Derived cache, rebuilt automatically on first run
+data/vision_map.npz
+
+# Local / editor
+.env
+.claude/
+.vscode/
+.idea/
+.DS_Store
